@@ -1,6 +1,7 @@
 package logio
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -67,12 +68,12 @@ func (server *logioConn) dial() error {
 // will be enqueued in a buffer for sending to the logio server. If the
 // buffer is full, the message will be dropped and an error message will
 // be returned
-func (server *logioConn) Write(p []byte) (int, error) {
+func (server *logioConn) Write(b []byte) (int, error) {
 	select {
-	case server.writerCh <- p:
-		return len(p), nil
+	case server.writerCh <- b:
+		return len(b), nil
 	default:
-		// TODO: Add a hook for dropped messages
+		// TODO: Add a hook for dropped messages?
 		return 0, fmt.Errorf("error: logio buffer too full")
 	}
 }
@@ -98,6 +99,24 @@ func (server *logioConn) handleWrites() {
 func (server *logioConn) send(write []byte) error {
 	server.mu.RLock()
 	defer server.mu.RUnlock()
-	_, err := server.conn.Write(write)
+	_, err := server.conn.Write(server.format(write))
 	return err
+}
+
+func (server *logioConn) format(write []byte) []byte {
+	formatted, err := json.Marshal(Message{
+		Log:  string(write),
+		Name: os.Args[1],
+	})
+	if err != nil {
+		debug("logio", err)
+	}
+	return formatted
+}
+
+type Message struct {
+	Log      string   `json:"log"`
+	Name     string   `json:"name,omitempty"`
+	Includes []string `json:"includes,omitempty"`
+	Excludes []string `json:"excludes,omitempty"`
 }
