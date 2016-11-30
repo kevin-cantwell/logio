@@ -7,11 +7,15 @@ import (
 	"log"
 	"net"
 	"os"
+	"path"
 	"sync"
 	"time"
 )
 
-var Debug = false
+var (
+	Debug = false
+	Tags  map[string]string
+)
 
 func debug(a ...interface{}) {
 	if Debug {
@@ -26,9 +30,12 @@ func init() {
 		fmt.Println("logio:", "LOGIO_SERVER unset")
 		return
 	}
+	hostname, _ := os.Hostname()
 	server := &logioConn{
-		addr:     addr,
-		writerCh: make(chan []byte),
+		addr:         addr,
+		hostname:     hostname,
+		procname:     path.Base(os.Args[0]),
+		outgoingLogs: make(chan LogMessage, 1000),
 	}
 	if err := server.dial(); err != nil {
 		// TODO: Log the err? Panic?
@@ -42,8 +49,10 @@ func init() {
 }
 
 type logioConn struct {
-	addr     string
-	writerCh chan []byte
+	addr         string
+	hostname     string
+	procname     string
+	outgoingLogs chan LogMessage
 
 	conn net.Conn
 	mu   sync.RWMutex
@@ -68,10 +77,17 @@ func (server *logioConn) dial() error {
 // will be enqueued in a buffer for sending to the logio server. If the
 // buffer is full, the message will be dropped and an error message will
 // be returned
-func (server *logioConn) Write(b []byte) (int, error) {
+func (server *logioConn) Write(raw []byte) (int, error) {
+	logmsg := LogMessage{
+		Time:     time.Now(),
+		Log:      string(raw),
+		Hostname: server.hostname,
+		Procname: server.procname,
+		Tags:     Tags,
+	}
 	select {
-	case server.writerCh <- b:
-		return len(b), nil
+	case server.outgoingLogs <- logmsg:
+		return len(raw), nil
 	default:
 		// TODO: Add a hook for dropped messages?
 		return 0, fmt.Errorf("error: logio buffer too full")
@@ -79,8 +95,8 @@ func (server *logioConn) Write(b []byte) (int, error) {
 }
 
 func (server *logioConn) handleWrites() {
-	for write := range server.writerCh {
-		err := server.send(write)
+	for outgoing := range server.outgoingLogs {
+		err := server.send(outgoing)
 		if err == nil {
 			continue
 		}
@@ -96,27 +112,28 @@ func (server *logioConn) handleWrites() {
 	}
 }
 
-func (server *logioConn) send(write []byte) error {
-	server.mu.RLock()
-	defer server.mu.RUnlock()
-	_, err := server.conn.Write(server.format(write))
-	return err
-}
-
-func (server *logioConn) format(write []byte) []byte {
-	formatted, err := json.Marshal(Message{
-		Log:  string(write),
-		Name: os.Args[1],
-	})
+func (server *logioConn) send(outgoing LogMessage) error {
+	formatted, err := json.Marshal(outgoing)
 	if err != nil {
 		debug("logio", err)
 	}
-	return formatted
+	server.mu.RLock()
+	defer server.mu.RUnlock()
+	_, err = server.conn.Write(formatted)
+	return err
 }
 
-type Message struct {
-	Log      string   `json:"log"`
-	Name     string   `json:"name,omitempty"`
-	Includes []string `json:"includes,omitempty"`
-	Excludes []string `json:"excludes,omitempty"`
+type LogMessage struct {
+	// Time is the time at which the log was written. Required.
+	Time time.Time `json:"time"`
+	// The entire log line. Required.
+	Log string `json:"log"`
+	// IP is set by the server
+	IP string `json:"ip,omitempty"`
+	// Hostname from `os.Hostname() (string, error)`
+	Hostname string `json:"hostname,omitempty"`
+	// Procname is taken as `path.Base(os.Args[0])`
+	Procname string `json:"procname,omitempty"`
+	// User-supplied key-value tags
+	Tags map[string]string `json:"tags,omitempty"`
 }

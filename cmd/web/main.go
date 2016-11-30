@@ -7,20 +7,22 @@ import (
 	"net"
 	"net/http"
 	"sync"
+
+	"github.com/kevin-cantwell/logio"
 )
 
 func main() {
 	// The raw log messages that clients send over UDP to the logio server
-	incomingLogs := make(chan LogMessage, 1000)
+	incomingLogs := make(chan logio.LogMessage, 1000)
 	defer close(incomingLogs)
 
 	go ListenUDP(incomingLogs, ":7514")
 	ListenHTTP(incomingLogs, ":7575")
 }
 
-func ListenHTTP(incomingLogs <-chan LogMessage, port string) {
+func ListenHTTP(incomingLogs <-chan logio.LogMessage, port string) {
 	// Fan out log messages to all connected clients
-	clients := map[*http.Request]chan LogMessage{}
+	clients := map[*http.Request]chan logio.LogMessage{}
 	var mu sync.RWMutex
 	go func() {
 		for incomingLog := range incomingLogs {
@@ -29,7 +31,11 @@ func ListenHTTP(incomingLogs <-chan LogMessage, port string) {
 				select {
 				case outgoingLogs <- incomingLog:
 				default:
-					fmt.Println(r.Host, "Dropped log")
+					ip := r.Header.Get("X-Forwarded-For")
+					if ip == "" {
+						ip = r.RemoteAddr
+					}
+					fmt.Println(ip, "Dropped log")
 				}
 			}
 			mu.RUnlock()
@@ -37,11 +43,16 @@ func ListenHTTP(incomingLogs <-chan LogMessage, port string) {
 	}()
 
 	http.HandleFunc("/logs", func(w http.ResponseWriter, r *http.Request) {
-		fmt.Println(r.Host, "Connection opened")
-		defer fmt.Println(r.Host, "Connection closed")
+		ip := r.Header.Get("X-Forwarded-For")
+		if ip == "" {
+			ip = r.RemoteAddr
+		}
+
+		fmt.Println(ip, "Connection opened")
+		defer fmt.Println(ip, "Connection closed")
 
 		// Register this connection to receive incoming logs via fan-out above
-		incomingLogs := make(chan LogMessage, 1000)
+		incomingLogs := make(chan logio.LogMessage, 1000)
 		mu.Lock()
 		clients[r] = incomingLogs
 		mu.Unlock()
@@ -51,7 +62,7 @@ func ListenHTTP(incomingLogs <-chan LogMessage, port string) {
 			notif, ok := w.(http.CloseNotifier)
 			if ok {
 				<-notif.CloseNotify()
-				fmt.Println(r.Host, "CloseNotify")
+				fmt.Println(ip, "CloseNotify")
 
 				mu.Lock()
 				close(incomingLogs)
@@ -71,12 +82,10 @@ func ListenHTTP(incomingLogs <-chan LogMessage, port string) {
 		w.Header().Set("Connection", "keep-alive")
 
 		// Begin streaming. Channel will close when CloseNotifier returns
-		for logmsg := range incomingLogs {
-			name := logmsg.Name
-			if name == "" {
-				name = logmsg.IP
-			}
-			fmt.Fprintf(w, "[%s] %s", name, logmsg.Log)
+		// E.g.: 2006-01-02T15:04:05.000 <ip> <procname>[<hostname>]: <log>
+		for msg := range incomingLogs {
+			t := msg.Time.UTC().Format("2006-01-02T15:04:05.000")
+			fmt.Fprintf(w, "%s %s %s[%s]: %s", t, msg.IP, msg.Procname, msg.Hostname, msg.Log)
 			flusher.Flush()
 		}
 	})
@@ -85,7 +94,7 @@ func ListenHTTP(incomingLogs <-chan LogMessage, port string) {
 	http.ListenAndServe(port, nil)
 }
 
-func ListenUDP(incomingLogs chan<- LogMessage, port string) {
+func ListenUDP(incomingLogs chan<- logio.LogMessage, port string) {
 	/* Lets prepare a address at any address at port 7514*/
 	serverAddr, err := net.ResolveUDPAddr("udp", port)
 	if err != nil {
@@ -109,7 +118,7 @@ func ListenUDP(incomingLogs chan<- LogMessage, port string) {
 			continue
 		}
 
-		logmsg := LogMessage{
+		logmsg := logio.LogMessage{
 			IP: addr.IP.String(),
 		}
 		if err := json.Unmarshal(buf[0:n], &logmsg); err != nil {
@@ -119,85 +128,3 @@ func ListenUDP(incomingLogs chan<- LogMessage, port string) {
 		incomingLogs <- logmsg
 	}
 }
-
-type LogMessage struct {
-	Log      string   `json:"log"`
-	IP       string   `json:"ip"`
-	Name     string   `json:"name,omitempty"`
-	Includes []string `json:"includes,omitempty"`
-	Excludes []string `json:"excludes,omitempty"`
-}
-
-// var (
-// 	tails = map[*Tail]bool{}
-// 	mu    sync.Mutex
-// )
-
-// type Tail struct {
-// 	messages chan LogMessage
-// 	filter   Filter
-// }
-
-// func (tail *Tail) Send(logmsg LogMessage) error {
-// 	// if tail.filter, then:
-// 	select {
-// 	case tail.messages <- logmsg:
-// 		return nil
-// 	default:
-// 		return errors.New("error: tail unavailable")
-// 	}
-// }
-
-// func (tail *Tail) Wants(logmsg LogMessage) bool {
-// 	// TODO: Filter tails based on log content
-// 	return true
-// }
-
-// type Filter struct {
-// }
-
-// type Log struct {
-// 	Time int64
-// 	Msg  string
-// }
-
-// type Logs struct {
-// 	a []Log
-// }
-
-// func (incomingLogs *Logs) Append(l Log) {
-// 	incomingLogs.a = append(incomingLogs.a, l)
-// }
-
-// func (incomingLogs *Logs) Before(upper int64) Logs {
-// 	u := sort.Search(len(incomingLogs.a), func(i int) bool {
-// 		return incomingLogs.a[i].Time >= upper
-// 	})
-// 	return Logs{
-// 		// u+1 gives us a between function that is inclusive of the upper bound
-// 		a: incomingLogs.a[:u+1],
-// 	}
-// }
-
-// func (incomingLogs *Logs) Before(upper int64) Logs {
-// 	u := sort.Search(len(incomingLogs.a), func(i int) bool {
-// 		return incomingLogs.a[i].Time >= upper
-// 	})
-// 	return Logs{
-// 		// u+1 gives us a between function that is inclusive of the upper bound
-// 		a: incomingLogs.a[:u+1],
-// 	}
-// }
-
-// func (incomingLogs *Logs) Between(lower, upper int64) Logs {
-// 	l := sort.Search(len(incomingLogs.a), func(i int) bool {
-// 		return incomingLogs.a[i].Time >= lower
-// 	})
-// 	u := sort.Search(len(incomingLogs.a), func(i int) bool {
-// 		return incomingLogs.a[i].Time >= upper
-// 	})
-// 	return Logs{
-// 		// u+1 gives us a between function that is inclusive of the upper bound
-// 		a: incomingLogs.a[l : u+1],
-// 	}
-// }
