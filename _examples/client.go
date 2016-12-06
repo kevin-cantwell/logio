@@ -10,11 +10,8 @@ import (
 
 func main() {
 	logio.Debug = true
-	logio.Tags = map[string]string{
-		"arg1": os.Args[1],
-	}
 	for {
-		log.Println(os.Args)
-		time.Sleep(time.Millisecond * 10)
+		log.Println(os.Args[1])
+		time.Sleep(time.Millisecond * 100)
 	}
 }

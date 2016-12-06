@@ -13,9 +13,32 @@ import (
 )
 
 var (
-	Debug = false
-	Tags  map[string]string
+	Debug  = false
+	Config = func() config {
+		procname := path.Base(os.Args[0])
+		hostname, _ := os.Hostname()
+
+		return config{
+			App:      procname,
+			ProcName: "", // Left blank by default
+			ProcID:   hostname,
+		}
+	}()
 )
+
+func Configure(app, procname, procid string) {
+	Config = config{
+		App:      app,
+		ProcName: procname,
+		ProcID:   procid,
+	}
+}
+
+type config struct {
+	App      string
+	ProcName string
+	ProcID   string
+}
 
 func debug(a ...interface{}) {
 	if Debug {
@@ -30,12 +53,9 @@ func init() {
 		fmt.Println("logio:", "LOGIO_SERVER unset")
 		return
 	}
-	hostname, _ := os.Hostname()
 	server := &logioConn{
 		addr:         addr,
-		hostname:     hostname,
-		procname:     path.Base(os.Args[0]),
-		outgoingLogs: make(chan LogMessage, 1000),
+		outgoingLogs: make(chan Message, 1000),
 	}
 	if err := server.dial(); err != nil {
 		// TODO: Log the err? Panic?
@@ -50,12 +70,10 @@ func init() {
 
 type logioConn struct {
 	addr         string
-	hostname     string
-	procname     string
-	outgoingLogs chan LogMessage
+	outgoingLogs chan Message
 
-	conn net.Conn
 	mu   sync.RWMutex
+	conn net.Conn
 }
 
 // Dials the logio server and sets the connection. May be
@@ -65,8 +83,20 @@ func (server *logioConn) dial() error {
 	server.mu.Lock()
 	defer server.mu.Unlock()
 
-	conn, err := net.Dial("udp", server.addr)
+	conn, err := net.Dial("tcp", server.addr)
 	if err != nil {
+		return err
+	}
+	header := Header{
+		App:      Config.App,
+		ProcName: Config.ProcName,
+		ProcID:   Config.ProcID,
+	}
+	headerBody, err := json.Marshal(header)
+	if err != nil {
+		return err
+	}
+	if _, err := conn.Write(headerBody); err != nil {
 		return err
 	}
 	server.conn = conn
@@ -78,12 +108,9 @@ func (server *logioConn) dial() error {
 // buffer is full, the message will be dropped and an error message will
 // be returned
 func (server *logioConn) Write(raw []byte) (int, error) {
-	logmsg := LogMessage{
-		Time:     time.Now(),
-		Log:      string(raw),
-		Hostname: server.hostname,
-		Procname: server.procname,
-		Tags:     Tags,
+	logmsg := Message{
+		Time: time.Now(),
+		Log:  string(raw),
 	}
 	select {
 	case server.outgoingLogs <- logmsg:
@@ -112,28 +139,29 @@ func (server *logioConn) handleWrites() {
 	}
 }
 
-func (server *logioConn) send(outgoing LogMessage) error {
+func (server *logioConn) send(outgoing Message) error {
 	formatted, err := json.Marshal(outgoing)
 	if err != nil {
 		debug("logio", err)
 	}
+
 	server.mu.RLock()
-	defer server.mu.RUnlock()
 	_, err = server.conn.Write(formatted)
+	server.mu.RUnlock()
 	return err
 }
 
-type LogMessage struct {
+type Header struct {
+	App      string `json:"app"`
+	ProcName string `json:"procname"`
+	ProcID   string `json:"procid"`
+
+	Tags map[string]string `json:"tags,omitempty"`
+}
+
+type Message struct {
 	// Time is the time at which the log was written. Required.
 	Time time.Time `json:"time"`
 	// The entire log line. Required.
 	Log string `json:"log"`
-	// IP is set by the server
-	IP string `json:"ip,omitempty"`
-	// Hostname from `os.Hostname() (string, error)`
-	Hostname string `json:"hostname,omitempty"`
-	// Procname is taken as `path.Base(os.Args[0])`
-	Procname string `json:"procname,omitempty"`
-	// User-supplied key-value tags
-	Tags map[string]string `json:"tags,omitempty"`
 }
