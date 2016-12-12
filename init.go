@@ -6,162 +6,214 @@ import (
 	"io"
 	"log"
 	"net"
+	"net/url"
 	"os"
 	"path"
+	"strings"
 	"sync"
 	"time"
+
+	"github.com/kevin-cantwell/logio/internal/server"
 )
 
 var (
+	// Debug may be set to true for troubleshooting.
+	// The env var LOG_LEVEL=DEBUG is equivalent to setting Debug = true
 	Debug  = false
-	Config = func() config {
-		procname := path.Base(os.Args[0])
-		hostname, _ := os.Hostname()
-
-		return config{
-			App:      procname,
-			ProcName: "", // Left blank by default
-			ProcID:   hostname,
-		}
-	}()
+	loglvl = strings.ToUpper(os.Getenv("LOG_LEVEL"))
 )
 
-func Configure(app, procname, procid string) {
-	Config = config{
-		App:      app,
-		ProcName: procname,
-		ProcID:   procid,
+func init() {
+	rawurl := os.Getenv("LOGIO_URL")
+	if rawurl == "" {
+		debug("LOGIO_SERVER unset")
+		return
 	}
-}
 
-type config struct {
-	App      string
-	ProcName string
-	ProcID   string
+	c, err := connectURL(rawurl)
+	if err != nil {
+		debug(err)
+		// We do not return here because the server may become available at some point
+	}
+
+	go c.handleWrites()
+
+	// Duplicates all logs to the logio server connection. Subsequent calls to log.SetOutput will break
+	// the logio server connection. The file os.Stderr is the default output of the log package.
+	log.SetOutput(io.MultiWriter(os.Stderr, c))
 }
 
 func debug(a ...interface{}) {
-	if Debug {
-		fmt.Println(a...)
+	if Debug || loglvl == "DEBUG" {
+		p := []interface{}{"logio:"}
+		p = append(p, a...)
+		fmt.Println(p...)
 	}
 }
 
-func init() {
-	addr := os.Getenv("LOGIO_SERVER")
-	if addr == "" {
-		// TODO: Log something? Panic?
-		fmt.Println("logio:", "LOGIO_SERVER unset")
-		return
-	}
-	server := &logioConn{
-		addr:         addr,
-		outgoingLogs: make(chan Message, 1000),
-	}
-	if err := server.dial(); err != nil {
-		// TODO: Log the err? Panic?
-		fmt.Println("logio:", err)
-		return
-	}
-	go server.handleWrites()
+type Config struct {
+	Username string
+	Password string
+	Address  string // host:port
 
-	multi := io.MultiWriter(os.Stderr, server)
-	log.SetOutput(multi)
+	App  string
+	Proc string
+	Host string
 }
 
-type logioConn struct {
-	addr         string
-	outgoingLogs chan Message
+type connection struct {
+	cfg  Config
+	logs chan server.Log
 
 	mu   sync.RWMutex
 	conn net.Conn
 }
 
-// Dials the logio server and sets the connection. May be
-// used to redial in response to errors. Safe for concurrent
-// use.
-func (server *logioConn) dial() error {
-	server.mu.Lock()
-	defer server.mu.Unlock()
-
-	conn, err := net.Dial("tcp", server.addr)
-	if err != nil {
-		return err
-	}
-	header := Header{
-		App:      Config.App,
-		ProcName: Config.ProcName,
-		ProcID:   Config.ProcID,
-	}
-	headerBody, err := json.Marshal(header)
-	if err != nil {
-		return err
-	}
-	if _, err := conn.Write(headerBody); err != nil {
-		return err
-	}
-	server.conn = conn
-	return nil
-}
-
-// Write implements the io.Writer interface. Every message sent Write
+// Write implements the io.Writer interface. Every server.Log sent to Write
 // will be enqueued in a buffer for sending to the logio server. If the
-// buffer is full, the message will be dropped and an error message will
+// buffer is full, the server.Log will be dropped and an error server.Log will
 // be returned
-func (server *logioConn) Write(raw []byte) (int, error) {
-	logmsg := Message{
+func (c *connection) Write(raw []byte) (int, error) {
+	l := server.Log{
 		Time: time.Now(),
-		Log:  string(raw),
+		Raw:  string(raw),
 	}
 	select {
-	case server.outgoingLogs <- logmsg:
+	case c.logs <- l:
 		return len(raw), nil
 	default:
-		// TODO: Add a hook for dropped messages?
-		return 0, fmt.Errorf("error: logio buffer too full")
+		debug("buffer full")
+		return 0, fmt.Errorf("logio buffer full")
 	}
 }
 
-func (server *logioConn) handleWrites() {
-	for outgoing := range server.outgoingLogs {
-		err := server.send(outgoing)
+// Dials the logio server and returns the connection. May be
+// used to redial in response to errors.
+func (c *connection) dial() (net.Conn, error) {
+	conn, err := net.Dial("tcp", c.cfg.Address)
+	if err != nil {
+		return nil, err
+	}
+	topic := server.Topic{
+		App:  c.cfg.App,
+		Proc: c.cfg.Proc,
+		Host: c.cfg.Host,
+	}
+	topicBody, err := json.Marshal(topic)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := conn.Write(topicBody); err != nil {
+		return nil, err
+	}
+	return conn, nil
+}
+
+func (c *connection) handleWrites() {
+	for l := range c.logs {
+		err := c.send(l)
 		if err == nil {
 			continue
 		}
-		debug("logio:", err)
+		debug(err)
 
-		// If the connection is bad, then pause until a connection can be re-established
-		for _, ok := err.(*net.OpError); ok; _, ok = err.(*net.OpError) {
+		// If the connection is bad, then pause for 1s and re-dial
+		for {
 			time.Sleep(time.Second)
-			if err = server.dial(); err != nil {
-				debug("logio:", err)
+			if conn, err := c.dial(); err != nil {
+				debug(err)
+				continue
+			} else {
+				c.mu.Lock()
+				c.conn = conn
+				c.mu.Unlock()
+				break
 			}
 		}
 	}
 }
 
-func (server *logioConn) send(outgoing Message) error {
-	formatted, err := json.Marshal(outgoing)
-	if err != nil {
-		debug("logio", err)
+func (c *connection) send(l server.Log) error {
+	if c.conn == nil {
+		return fmt.Errorf("no connection to logio server")
 	}
-
-	server.mu.RLock()
-	_, err = server.conn.Write(formatted)
-	server.mu.RUnlock()
+	formatted, err := json.Marshal(l)
+	if err != nil {
+		return err
+	}
+	_, err = c.conn.Write(formatted)
 	return err
 }
 
-type Header struct {
-	App      string `json:"app"`
-	ProcName string `json:"procname"`
-	ProcID   string `json:"procid"`
+// ConnectURL is the manual alternative to setting the connection string
+// via env vars. Generally, only the app paramter is needed. Both proc and host
+// sensibly default to the process name and hostname, respectively.
+//
+// logio://user:pass@c:port?app=required&proc=optional&host=optional
+func connectURL(rawurl string) (*connection, error) {
+	u, err := url.Parse(rawurl)
+	if err != nil {
+		return nil, err
+	}
 
-	Tags map[string]string `json:"tags,omitempty"`
+	if u.Scheme != "logio" {
+		return nil, fmt.Errorf("invalid logio URL scheme: %s", u.Scheme)
+	}
+
+	h, p, err := net.SplitHostPort(u.Host)
+	if err != nil {
+		return nil, fmt.Errorf("invalid logio URL host: %s", u.Host)
+	}
+
+	address := net.JoinHostPort(h, p)
+
+	var username, password string
+	if u.User != nil {
+		username = u.User.Username()
+		p, isSet := u.User.Password()
+		if isSet {
+			password = p
+		}
+	}
+
+	var app, proc, host string
+	if v, ok := u.Query()["app"]; ok {
+		app = v[0]
+	} else {
+		// TODO: Should app have a default? Maybe just `app`?
+	}
+	if v, ok := u.Query()["proc"]; ok {
+		proc = v[0]
+	} else {
+		// Default is the process name
+		proc = path.Base(os.Args[0])
+	}
+	if v, ok := u.Query()["host"]; ok {
+		host = v[0]
+	} else {
+		// Default is the hostname
+		host, _ = os.Hostname()
+	}
+
+	return connect(Config{
+		Username: username,
+		Password: password,
+		Address:  address,
+		App:      app,
+		Proc:     proc,
+		Host:     host,
+	})
 }
 
-type Message struct {
-	// Time is the time at which the log was written. Required.
-	Time time.Time `json:"time"`
-	// The entire log line. Required.
-	Log string `json:"log"`
+func connect(cfg Config) (*connection, error) {
+	c := connection{
+		cfg:  cfg,
+		logs: make(chan server.Log, 1024), // TODO: Make buffer size configurable?
+	}
+	conn, err := c.dial()
+	if err != nil {
+		return &c, err
+	}
+	c.conn = conn
+	return &c, nil
 }

@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"sync"
 
-	"github.com/kevin-cantwell/logio"
 	"github.com/kevin-cantwell/logio/internal/server"
 )
 
@@ -19,8 +18,8 @@ func main() {
 		},
 	}
 
-	go ListenTCP(brokers, ":12157") // L=12, O=15, G=7
-	ListenHTTP(brokers, ":7575")
+	go ListenPublishers(brokers, ":7701")
+	ListenSubscribers(brokers, ":7702")
 }
 
 type UserBrokers struct {
@@ -42,26 +41,27 @@ func (ub *UserBrokers) Set(username string, broker *server.Broker) {
 	ub.b[username] = broker
 }
 
-func ListenHTTP(brokers *UserBrokers, port string) {
-	http.HandleFunc("/logs", func(w http.ResponseWriter, r *http.Request) {
+func ListenSubscribers(brokers *UserBrokers, port string) {
+	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		topics := server.TopicMatcher{
 			AppPattern:  r.URL.Query().Get("app"),
 			ProcPattern: r.URL.Query().Get("proc"),
+			HostPattern: r.URL.Query().Get("host"),
 		}
 
-		ip := r.Header.Get("X-Forwarded-For")
-		if ip == "" {
-			ip = r.RemoteAddr
+		addr := r.Header.Get("X-Forwarded-For")
+		if addr == "" {
+			addr = r.RemoteAddr
 		}
 
-		host, _, err := net.SplitHostPort(ip)
+		ip, _, err := net.SplitHostPort(addr)
 		if err != nil {
 			http.Error(w, "Cannot determine ip", http.StatusBadRequest)
 			return
 		}
 
-		fmt.Printf("SUB hello: %s %s[%s]\n", host, topics.AppPattern, topics.ProcPattern)
-		defer fmt.Printf("SUB goodbye: %s %s[%s]\n", host, topics.AppPattern, topics.ProcPattern)
+		log.Printf("Subscriber opened: ip=%s app=%s proc=%s host=%s\n", ip, topics.AppPattern, topics.ProcPattern, topics.HostPattern)
+		defer log.Printf("Subscriber closed: ip=%s app=%s proc=%s host=%s\n", ip, topics.AppPattern, topics.ProcPattern, topics.HostPattern)
 
 		broker := brokers.Get("TBD")
 		subscription := broker.Subscribe(topics)
@@ -88,18 +88,18 @@ func ListenHTTP(brokers *UserBrokers, port string) {
 		// Begin streaming. Channel will close when CloseNotifier returns
 		// E.g.: 2006-01-02T15:04:05.000 <ip> <procname>[<hostname>]: <log>
 		for msg := range subscription.Messages() {
-			t := msg.Time.UTC().Format("2006-01-02T15:04:05.000")
-			fmt.Fprintf(w, "%s %s %s[%s]: %s", t, msg.Host, msg.App, msg.Proc, msg.Log)
+			t := msg.Log.Time.UTC().Format("2006-01-02T15:04:05.000")
+			fmt.Fprintf(w, "%s %s[%s] %s: %s", t, msg.Topic.App, msg.Topic.Proc, msg.Topic.Host, msg.Log.Raw)
 			flusher.Flush()
 		}
 	})
 
-	fmt.Println("Listening on tcp", port)
+	fmt.Println("Listening for subscribers on tcp", port)
 	http.ListenAndServe(port, nil)
 }
 
 // Listens for log publishers and registers them for discovery by subscribers
-func ListenTCP(brokers *UserBrokers, port string) {
+func ListenPublishers(brokers *UserBrokers, port string) {
 	/* Lets prepare a address at any address at port 7514*/
 	serverAddr, err := net.ResolveTCPAddr("tcp", port)
 	if err != nil {
@@ -112,7 +112,7 @@ func ListenTCP(brokers *UserBrokers, port string) {
 	}
 	defer ln.Close()
 
-	fmt.Println("Listening on tcp", port)
+	fmt.Println("Listening for publishers on tcp", port)
 
 	for {
 		conn, err := ln.AcceptTCP()
@@ -124,7 +124,7 @@ func ListenTCP(brokers *UserBrokers, port string) {
 		go func(conn *net.TCPConn) {
 			defer conn.Close()
 
-			host, _, err := net.SplitHostPort(conn.RemoteAddr().String())
+			ip, _, err := net.SplitHostPort(conn.RemoteAddr().String())
 			if err != nil {
 				conn.Write([]byte(err.Error()))
 				return
@@ -132,83 +132,27 @@ func ListenTCP(brokers *UserBrokers, port string) {
 
 			dec := json.NewDecoder(conn)
 
-			// The header contains the meta-data for the process as well as authentication strings.
-			// Every new connection is required to send the header as the first line in the stream.
-			var header logio.Header
-			if err := dec.Decode(&header); err != nil {
+			// Every new connection is required to send the Topic as the first line in the stream.
+			var topic server.Topic
+			if err := dec.Decode(&topic); err != nil {
 				conn.Write([]byte(err.Error()))
 				return
 			}
 
-			proc := fmt.Sprintf("%s.%s", header.ProcName, header.ProcID)
-			if header.ProcName == "" {
-				proc = header.ProcID
-			}
-			if header.ProcID == "" {
-				proc = header.ProcName
-			}
+			log.Printf("Publisher opened: ip=%s app=%s proc=%s host=%s\n", ip, topic.App, topic.Proc, topic.Host)
+			defer log.Printf("Publisher closed: ip=%s app=%s proc=%s host=%s\n", ip, topic.App, topic.Proc, topic.Host)
 
-			topic := server.Topic{
-				App:  header.App,
-				Proc: proc,
-			}
-
-			fmt.Printf("PUB hello: %s %s[%s]\n", host, topic.App, topic.Proc)
-			defer fmt.Printf("PUB goodbye: %s %s[%s]\n", host, topic.App, topic.Proc)
-
-			// TODO: Detect username from connection
+			// TODO: Authenticate connection and retrieve brokers by username
 			broker := brokers.Get("TBD")
 
-			var msg logio.Message
+			var l server.Log
 			for {
-				if err := dec.Decode(&msg); err != nil {
+				if err := dec.Decode(&l); err != nil {
 					conn.Write([]byte(err.Error()))
 					return
 				}
-				broker.Notify(server.Message{
-					Topic: topic,
-					Time:  msg.Time,
-					Host:  host,
-					Log:   msg.Log,
-				})
+				broker.Notify(l, topic)
 			}
 		}(conn)
 	}
 }
-
-/*------------------------------------ UDP LOGIC --------------------------------------*/
-
-// func ListenUDP(incomingLogs chan<- logio.Message, port string) {
-// 	/* Lets prepare a address at any address at port 7514*/
-// 	serverAddr, err := net.ResolveUDPAddr("udp", port)
-// 	if err != nil {
-// 		log.Fatal(err)
-// 	}
-
-// 	/* Now listen at selected port */
-// 	serverConn, err := net.ListenUDP("udp", serverAddr)
-// 	if err != nil {
-// 		log.Fatal(err)
-// 	}
-// 	defer serverConn.Close()
-
-// 	buf := make([]byte, 1024)
-
-// 	fmt.Println("Listening on udp", port)
-// 	for {
-// 		n, addr, err := serverConn.ReadFromUDP(buf)
-// 		if err != nil {
-// 			fmt.Println("Error:", err)
-// 			continue
-// 		}
-
-// 		logmsg := logio.Message{
-// 			IP: addr.IP.String(),
-// 		}
-// 		if err := json.Unmarshal(buf[0:n], &logmsg); err != nil {
-// 			fmt.Println("Error:", err)
-// 			continue
-// 		}
-// 		incomingLogs <- logmsg
-// 	}
-// }

@@ -7,20 +7,25 @@ import (
 )
 
 type Message struct {
-	Topic
-	Time time.Time
-	Host string
-	Log  string
+	Topic Topic
+	Log   Log
+}
+
+type Log struct {
+	Time time.Time `json:"time"`
+	Raw  string    `json:"raw"`
 }
 
 type Topic struct {
-	App  string
-	Proc string
+	App  string `json:"app"`
+	Proc string `json:"proc"`
+	Host string `json:"host"`
 }
 
 type TopicMatcher struct {
 	AppPattern  string
 	ProcPattern string
+	HostPattern string
 }
 
 func (matcher TopicMatcher) Matches(topic Topic) bool {
@@ -56,13 +61,13 @@ type Broker struct {
 }
 
 // Notify sends msg to all subscribers of topic.
-func (b *Broker) Notify(msg Message) {
+func (b *Broker) Notify(l Log, t Topic) {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 
 	for _, sub := range b.subscriptions {
-		if sub.topics.Matches(msg.Topic) {
-			sub.msgs <- msg
+		if sub.topics.Matches(t) {
+			sub.msgs <- Message{Log: l, Topic: t}
 		}
 	}
 }
