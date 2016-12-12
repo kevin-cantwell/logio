@@ -51,5 +51,8 @@ $ curl -N 'http://logio-server.example.com:7702?app=myapp&proc=web|worker'
 2016-12-06T22:14:21.901 myapp[web] i-10-34-20-12: 2016/12/06 17:14:21 INFO This is a web log
 ```
 
+The output of the subscriber is formatted like so:
+
+`<timestamp> <app>[<proc>] <host>: <log>`
 
 
