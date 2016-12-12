@@ -1,22 +1,55 @@
-TODO:
-* Send default tags with log message (hostname, ip)
-* Filter on tags
+### LOGIO
 
-## Sending a Log Stream
-Every new TCP connection intended to stream logs must include a header as the first line.
+Logio is a system for publishings log streams to a server and fanning them out to client subscriptions. It consists of a server and simple PUB/SUB client implementations. Configured apps publish logs to a topic via a TCP stream and clients subscribe to N topics for a live stream of logs. The result is similar experience to Heroku's log plexing service, only self-hosted.
 
+### Usage
 
-// I LIKE THIS ONE!
-<timestamp> <app>[<proc>] <host>: <log>
-2016-12-06T22:14:21.448 whois[cache-invalidator] whois-cache-invalidator-1: 2016/12/06 17:14:21 bar
-2016-12-06T22:14:21.448 whois[web] i-10-34-20-12: 2016/12/06 17:14:21 bar
-2016-12-06T22:14:21.448 whois[web] c12acf98a2bb: 2016/12/06 17:14:21 bar
-2016-12-06T22:14:21.448 whois[web] Kevins-MBP.fios-router.home: 2016/12/06 17:14:21 bar
+#### Server
 
-LOGIO_URL='logio://127.0.0.1?app=whois&id=$DOCKERCLOUD_CONTAINER_HOSTNAME'
+Spinning up a Logio server is as simple as the following:
 
-LOGIO_URL='logio://user:pass@127.0.0.1/logs?source=source&app=app&proc=proc&env=production'
+```bash
+$ go get github.com/kevin-cantwell/logio
+$ go build -o logio github.com/kevin-cantwell/logio/cmd/logio-server/main.go
+$ logio-server
+Listening for subscribers on tcp :7702
+Listening for publishers on tcp :7701
+```
 
+#### Publisher
+
+A publisher is any app that produces logs. This project includes a Go package that will re-configure the default logger to publish logs
+to the server. Setting it up is as simple as importing the package and configuring a single connection string:
+
+```go
+import _ "github.com/kevin-cantwell/logio"
+```
+
+```bash
+$ export LOGIO_URL='logio://logio-server.example.com:7701?app=myapp&proc=web&host=foobar'
+```
+
+If you are familiar with Redis the connection string will makes sense to you:
+* `logio` is the schema and indicates that this is a Logio server we're connecting to
+* `logio-server.example.com` is the domain where the Logio server is hosted.
+* `7701` is the default port which handles log publications
+* `app` is the name of the app, which makes up part of the topic to which a client may subscribe
+* `proc` is the name of the process, which makes up part of the topic to which a client may subscribe
+* `host` is the unique identifier of the process. This is optional, and defaults to the hostname.
+
+#### Subscriber
+
+A subscriber is any client that requests logs on one or more topics to stream. A topic is composed of `app`, `proc`, and `host`. Subscribers may specify regex patterns that match multiple topics, thereby stitching multiple log streams into one (fan-out pattern).
+
+The below subscription matches any apps named `myapp` with a process named either `web` or `worker`:
+
+```bash
+$ curl -N 'http://logio-server.example.com:7702?app=myapp&proc=web|worker'
+2016-12-06T22:14:21.448 myapp[worker] i-10-45-22-14: 2016/12/06 17:14:21 INFO This is a worker log
+2016-12-06T22:14:21.567 myapp[web] i-10-34-20-12: 2016/12/06 17:14:21 ERROR This is a web error
+2016-12-06T22:14:21.782 myapp[web] i-10-34-20-12: 2016/12/06 17:14:21 INFO This is a web log
+2016-12-06T22:14:21.901 myapp[web] i-10-34-20-12: 2016/12/06 17:14:21 INFO This is a web log
+```
 
 
 
