@@ -79,7 +79,7 @@ func (b *Broker) Subscribe(topics TopicMatcher) *Subscription {
 
 	subscription := &Subscription{
 		topics: topics,
-		msgs:   make(chan Message),
+		msgs:   make(chan Message, 1024),
 	}
 
 	b.subscriptions = append(b.subscriptions, subscription)
