@@ -21,29 +21,26 @@ var (
 	// The env var LOG_LEVEL=DEBUG is equivalent to setting Debug = true
 	Debug  = false
 	loglvl = strings.ToUpper(os.Getenv("LOG_LEVEL"))
-	out    io.Writer
+
+	// May be nil on init()
+	out = func() io.Writer {
+		rawurl := os.Getenv("LOGIO_URL")
+		if rawurl == "" {
+			debug("LOGIO_SERVER unset")
+			return nil
+		}
+		c, err := connectURL(rawurl)
+		if err != nil {
+			debug(err)
+			// We do not return here because the server may become available at some point
+		}
+		go c.handleWrites()
+		// Duplicates all logs to the logio server connection. Subsequent calls to log.SetOutput will break
+		// the logio server connection. The file os.Stderr is the default output of the log package.
+		log.SetOutput(io.MultiWriter(os.Stderr, c))
+		return c
+	}()
 )
-
-func init() {
-	rawurl := os.Getenv("LOGIO_URL")
-	if rawurl == "" {
-		debug("LOGIO_SERVER unset")
-		return
-	}
-
-	c, err := connectURL(rawurl)
-	if err != nil {
-		debug(err)
-		// We do not return here because the server may become available at some point
-	}
-
-	go c.handleWrites()
-
-	out = c
-	// Duplicates all logs to the logio server connection. Subsequent calls to log.SetOutput will break
-	// the logio server connection. The file os.Stderr is the default output of the log package.
-	log.SetOutput(io.MultiWriter(os.Stderr, c))
-}
 
 func Output() io.Writer {
 	return out
