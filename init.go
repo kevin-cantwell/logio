@@ -21,6 +21,7 @@ var (
 	// The env var LOG_LEVEL=DEBUG is equivalent to setting Debug = true
 	Debug  = false
 	loglvl = strings.ToUpper(os.Getenv("LOG_LEVEL"))
+	out    io.Writer
 )
 
 func init() {
@@ -38,9 +39,14 @@ func init() {
 
 	go c.handleWrites()
 
+	out = c
 	// Duplicates all logs to the logio server connection. Subsequent calls to log.SetOutput will break
 	// the logio server connection. The file os.Stderr is the default output of the log package.
 	log.SetOutput(io.MultiWriter(os.Stderr, c))
+}
+
+func Output() io.Writer {
+	return out
 }
 
 func debug(a ...interface{}) {
