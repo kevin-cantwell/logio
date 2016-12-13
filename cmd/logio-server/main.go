@@ -47,6 +47,7 @@ func ListenSubscribers(brokers *UserBrokers, port string) {
 			AppPattern:  r.URL.Query().Get("app"),
 			ProcPattern: r.URL.Query().Get("proc"),
 			HostPattern: r.URL.Query().Get("host"),
+			LogPattern:  r.URL.Query().Get("log"),
 		}
 
 		addr := r.Header.Get("X-Forwarded-For")

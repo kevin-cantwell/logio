@@ -26,13 +26,20 @@ type TopicMatcher struct {
 	AppPattern  string
 	ProcPattern string
 	HostPattern string
+	LogPattern  string
 }
 
-func (matcher TopicMatcher) Matches(topic Topic) bool {
+func (matcher TopicMatcher) Matches(l Log, topic Topic) bool {
 	if !matches(matcher.AppPattern, topic.App) {
 		return false
 	}
 	if !matches(matcher.ProcPattern, topic.Proc) {
+		return false
+	}
+	if !matches(matcher.HostPattern, topic.Host) {
+		return false
+	}
+	if !matches(matcher.LogPattern, l.Raw) {
 		return false
 	}
 	return true
@@ -66,7 +73,7 @@ func (b *Broker) Notify(l Log, t Topic) {
 	defer b.mu.RUnlock()
 
 	for _, sub := range b.subscriptions {
-		if sub.topics.Matches(t) {
+		if sub.topics.Matches(l, t) {
 			sub.msgs <- Message{Log: l, Topic: t}
 		}
 	}
