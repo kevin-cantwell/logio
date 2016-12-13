@@ -10,4 +10,4 @@ go:
 
 docker:
 	docker build -t kevincantwell/logio:$(tag) .
-	docker tag kevincantwell/logio:$(tag) kevin-cantwell/logio:latest
+	docker tag kevincantwell/logio:$(tag) kevincantwell/logio:latest

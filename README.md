@@ -9,9 +9,7 @@ Logio is a system for publishings log streams to a server and fanning them out t
 Spinning up a Logio server is as simple as the following:
 
 ```
-$ go get github.com/kevin-cantwell/logio
-$ go build -o logio github.com/kevin-cantwell/logio/cmd/logio-server/main.go
-$ logio-server
+$ docker run --rm -it -p 7701:7701 -p 7702:7702  kevincantwell/logio
 Listening for subscribers on tcp :7702
 Listening for publishers on tcp :7701
 ```
