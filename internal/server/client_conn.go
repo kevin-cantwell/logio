@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/kevin-cantwell/logio/internal"
 	"github.com/kevin-cantwell/resp"
 	redis "gopkg.in/redis.v5"
 )
@@ -20,7 +21,7 @@ type ClientConn struct {
 
 	conn     *net.TCPConn
 	redis    *redis.Client
-	log      *Logger
+	log      *internal.Logger
 	username string
 	app      string
 	proc     string
@@ -33,7 +34,7 @@ func NewClientConn(conn *net.TCPConn, r *redis.Client) *ClientConn {
 		Writer: resp.NewWriter(conn),
 		conn:   conn,
 		redis:  r,
-		log: &Logger{
+		log: &internal.Logger{
 			Logger: log.New(os.Stdout, "", log.LstdFlags),
 			ID:     fmt.Sprintf("[%s]", conn.RemoteAddr().String()),
 		},

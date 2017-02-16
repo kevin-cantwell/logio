@@ -8,13 +8,13 @@ import (
 	"net/url"
 	"os"
 
-	"github.com/kevin-cantwell/logio/internal/server"
+	"github.com/kevin-cantwell/logio/internal"
 	"github.com/kevin-cantwell/resp"
 	"github.com/urfave/cli"
 )
 
 func main() {
-	logger := &server.Logger{
+	logger := &internal.Logger{
 		Logger: log.New(os.Stdout, "", log.LstdFlags),
 		ID:     fmt.Sprintf("[logio]"),
 	}
@@ -96,7 +96,7 @@ func main() {
 type LogioConn struct {
 	*resp.Reader
 	*resp.Writer
-	log *server.Logger
+	log *internal.Logger
 }
 
 func (conn *LogioConn) Auth(username, password string) error {
