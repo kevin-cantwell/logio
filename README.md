@@ -79,7 +79,6 @@ The output is prefixed with an ISO 8601 timestamp and the source information, fo
 2017-02-17T15:26:41.143Z myapp[worker] ip-10-10-13-144: 2017/02/17 15:26:41 This is a worker log line
 ```
 
-
 ##### LOGIO_URL:
 
 Logio supports a connection string for configuring servers and clients. It's similar in usage to a Redis connection string and follows a URL structure and is set via the env var `LOGIO_URL`:

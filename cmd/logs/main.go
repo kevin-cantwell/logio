@@ -38,6 +38,10 @@ func main() {
 			Value: "*",
 			Usage: "Glob pattern to denote which host logs to fetch",
 		},
+		cli.BoolFlag{
+			Name:  "follow, f",
+			Usage: "Follow real-time log streams (like tail -f).",
+		},
 	}
 	app.Action = func(ctx *cli.Context) error {
 		logioURL := os.Getenv("LOGIO_URL")
@@ -65,27 +69,12 @@ func main() {
 			return errors.New("AUTH error: " + err.Error())
 		}
 
-		if err := logioConn.Sub(config.App, config.Proc, config.Host); err != nil {
-			return errors.New("SUB error: " + err.Error())
-		}
-
-		for {
-			data, err := logioConn.ReadData()
-			if err != nil {
-				return err
-			}
-			switch d := data.(type) {
-			case resp.Error:
-				return errors.New(d.Human())
-			case resp.Array:
-				if len(d) != 5 {
-					return errors.New("unexpected message length")
-				}
-				fmt.Printf("%s %s[%s] %s: %s\n", d[0].Raw(), d[1].Raw(), d[2].Raw(), d[3].Raw(), d[4].Raw())
-			default:
-				logger.INFO(data.Quote())
+		if ctx.Bool("follow") {
+			if err := logioConn.Sub(config.App, config.Proc, config.Host); err != nil {
+				return errors.New("SUB error: " + err.Error())
 			}
 		}
+		return nil
 	}
 	if err := app.Run(os.Args); err != nil {
 		logger.ERROR(err)
@@ -120,7 +109,30 @@ func (conn *LogioConn) Auth(username, password string) error {
 }
 
 func (conn *LogioConn) Sub(app, proc, host string) error {
-	return conn.WriteArray(resp.BulkString("SUB"), resp.BulkString(app), resp.BulkString(proc), resp.BulkString(host))
+	err := conn.WriteArray(resp.BulkString("SUB"), resp.BulkString(app), resp.BulkString(proc), resp.BulkString(host))
+	if err != nil {
+		return err
+	}
+
+	for {
+		data, err := conn.ReadData()
+		if err != nil {
+			return err
+		}
+		switch d := data.(type) {
+		case resp.Error:
+			return errors.New(d.Human())
+		case resp.Array:
+			if len(d) != 5 {
+				return errors.New("unexpected message length")
+			}
+			fmt.Printf("%s %s[%s] %s: %s\n", d[0].Raw(), d[1].Raw(), d[2].Raw(), d[3].Raw(), d[4].Raw())
+		default:
+			// This should never happen, but shrug?
+			return errors.New(data.Quote())
+		}
+	}
+
 }
 
 func parseConfigURL(ctx *cli.Context, logioURL string) (*Config, error) {
