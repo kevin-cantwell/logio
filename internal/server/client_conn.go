@@ -100,7 +100,7 @@ func (conn *ClientConn) Handle(ctx context.Context) {
 				"Failed to handle APP command:",
 				conn.handleApp(ctx, cmd),
 			)
-		case "PUB": // PUB <nanoseconds> <log>
+		case "PUB": // PUB <nanoseconds> <log> [NOSTREAM]
 			conn.log.IFERR(
 				"Failed to handle PUB command:",
 				conn.handlePub(ctx, cmd),
@@ -158,12 +158,16 @@ func (conn *ClientConn) handleApp(ctx context.Context, cmd resp.Array) error {
 
 // Publishes messages as "<nanos>:<log>". This ensures that duplicate log lines don't write over each other
 func (conn *ClientConn) handlePub(ctx context.Context, cmd resp.Array) error {
-	if len(cmd) != 3 {
+	if len(cmd) < 3 {
 		return conn.WriteError("ERR wrong number of arguments for 'pub' command")
 	}
 
 	ts := cmd[1].Raw()
 	msg := cmd[2].Raw()
+	var nostream bool
+	if len(cmd) > 3 && strings.ToUpper(cmd[3].Raw()) == "NOSTREAM" {
+		nostream = true
+	}
 
 	tsfloat, err := strconv.ParseFloat(ts, 64)
 	if err != nil {
@@ -172,22 +176,30 @@ func (conn *ClientConn) handlePub(ctx context.Context, cmd resp.Array) error {
 
 	key := fmt.Sprintf("%s:%s:%s:%s", conn.username, conn.app, conn.proc, conn.host)
 	value := ts + ":" + msg
-	if _, err := conn.redis.Publish(key, value).Result(); err != nil {
-		// Don't die here. Just log it and drive on. Published logs are real-time only
-		conn.log.ERRORf("Failed to publish log at '%s': %v\n", ts, err)
-		conn.log.IFERR(
-			"Write error 'ERR stream':",
-			conn.WriteError("ERR stream: "+ts+":"+msg),
-		)
+
+	if !nostream {
+		// This needs to happen sequentially or the stream ordering will be off.
+		_, err := conn.redis.Publish(key, value).Result()
+		if err != nil {
+			// Don't die here. Just log it and drive on. Published logs are real-time only
+			conn.log.ERRORf("Failed to publish log at '%s': %v\n", ts, err)
+			conn.log.IFERR(
+				"Write error 'ERR stream':",
+				conn.WriteError("ERR stream: "+ts+":"+msg),
+			)
+		}
 	}
 
-	if _, err := conn.redis.ZAdd(key, redis.Z{Score: tsfloat, Member: value}).Result(); err != nil {
-		conn.log.IFERR(
-			"Write error 'ERR storage':",
-			conn.WriteError("ERR storage: "+ts+":"+msg),
-		)
-		return err
-	}
+	go func() {
+		_, err := conn.redis.ZAdd(key, redis.Z{Score: tsfloat, Member: value}).Result()
+		if err != nil {
+			conn.log.IFERR(
+				"Write error 'ERR storage':",
+				conn.WriteError("ERR storage: "+ts+":"+msg),
+			)
+		}
+	}()
+
 	return nil
 }
 

@@ -158,6 +158,7 @@ func main() {
 			return errors.New("APP error: " + err.Error())
 		}
 
+		// Read from logio server
 		go func() {
 			for {
 				data, err := logioConn.ReadData()
@@ -175,6 +176,7 @@ func main() {
 			}
 		}()
 
+		// Publish logs to logio server
 		logs := bufio.NewScanner(input)
 		for logs.Scan() {
 			if err := logioConn.Pub(logs.Text()); err != nil {
